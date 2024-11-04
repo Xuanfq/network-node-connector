@@ -498,14 +498,9 @@ class NodeService(SecureSocketBaseService):
             # target is own
             try:
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                if result.returncode == 0:
-                    output = result.stdout.strip()
-                else:
-                    output = result.stderr.strip()
-                return True, [result.returncode, output]
+                return True, [result.returncode, result.stdout.strip(), result.stderr.strip()]
             except Exception as e:
-                output = str(e)
-                return False, output
+                return False, str(e)
         flag, path = self.sv_route_query(target)
         if flag and len(path) >= 2:
             jump_node_name = path[1]
