@@ -48,8 +48,3 @@ def get_files(path: str, base_relative_path: str = None):
             if flag:
                 files.extend(sub_files)
     return True, files
-
-
-if __name__ == "__main__":
-    print(get_files("/home/aiden/project/Topor/*"))
-    print(get_files("/home/aiden/project/Topor/t/t1/a"))
