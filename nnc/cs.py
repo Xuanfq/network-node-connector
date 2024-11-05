@@ -3,6 +3,7 @@ from services.cs import SecureSocketBaseService, SecureSocketBaseClient
 from services.pf import PortForwarderManager, PortForwarder
 from utils.portpool import PortPool
 from utils import file as fileutils
+from utils.lock import ReadWriteLock
 import json
 import os
 import logging
@@ -261,13 +262,17 @@ class NodeService(SecureSocketBaseService):
         password: str = "",
         key: str = "",
         port_pool_range: tuple = (11000, 12000),
-        block_unknown_node: bool = True,
+        is_block_unknown_node: bool = True,
     ):
         self.name = name
-        self.block_unknown_node = block_unknown_node
-        self.nodes: list[NodeClient] = []  # other nodes
-        self.nodesdict: dict[str, NodeClient] = {}  # other nodes
-        self.routes = {}
+        self.is_block_unknown_node = is_block_unknown_node
+        # other nodes info
+        self.node_info_list: list[NodeClient] = []
+        self.node_info_dict: dict[str, NodeClient] = {}
+        self.node_info_lock = ReadWriteLock()
+        # route_dict[nodename][nodename] = True/False
+        self.route_dict: dict[str, dict[str, bool]] = {}
+        self.route_lock = ReadWriteLock()
         self.pfpp = PortPool(*port_pool_range)
         self.pfm = PortForwarderManager()
         super().__init__(host, port, username, password, key)
@@ -276,18 +281,18 @@ class NodeService(SecureSocketBaseService):
         return f"NodeService:{self.name}:{self.host}:{self.port}"
 
     def _handle_client(self, conn, addr):
-        if self.block_unknown_node:
+        if self.is_block_unknown_node:
             # block unknown ip
-            if addr[0] not in [node.host for node in self.nodes]:
+            if addr[0] not in [node.host for node in self.node_info_list]:
                 conn.close()
                 return
         return super()._handle_client(conn, addr)
 
     def _handle_request(self, __reqcmd, *args, **kwargs):
-        if self.block_unknown_node:
+        if self.is_block_unknown_node:
             # block unknown node name
             if "_reqnode" not in kwargs or kwargs["_reqnode"] not in [
-                node.name for node in self.nodes
+                node.name for node in self.node_info_list
             ]:
                 raise Exception(
                     f"Unknown Request Node: _reqnode={kwargs.get('_reqnode')}"
@@ -295,9 +300,7 @@ class NodeService(SecureSocketBaseService):
         return super()._handle_request(__reqcmd, *args, **kwargs)
 
     def sv_node_add(self, name, host, port, username, password, key):
-        if name in self.nodesdict:
-            return False
-        node = NodeClient(
+        nodeinfo = NodeClient(
             name,
             host,
             port,
@@ -306,30 +309,53 @@ class NodeService(SecureSocketBaseService):
             key,
             local_node_name=self.name,
         )
-        self.nodes.append(node)
-        self.nodesdict[name] = node
+        self.node_info_lock.acquire_write()
+        if name in self.node_info_dict:
+            return False
+        self.node_info_list.append(nodeinfo)
+        self.node_info_dict[name] = nodeinfo
+        self.node_info_lock.release_write()
         return True
 
     def sv_node_get(self, name):
-        return self.nodesdict.get(name, None)
+        """Generate Node Client
+
+        Keyword arguments:
+        name -- node name
+        Return: node client of node
+        """
+
+        node_base = self.node_info_dict.get(name, None)
+        node = NodeClient(
+            name,
+            host=node_base.host,
+            port=node_base.port,
+            username=node_base.username,
+            password=node_base.password,
+            key=node_base.key,
+            local_node_name=self.name,
+        )
+        return node
 
     def sv_route_update(self):
         # {name: {name: True, name: True, ...}, name: {name: True, name: True, ...}}
-        routes = {node.name: {} for node in self.nodes + [self]}
+        routes = {node.name: {} for node in self.node_info_list + [self]}
 
-        for node in self.nodes + [self]:
-            for other_node in self.nodes + [self]:
+        for node in self.node_info_list + [self]:
+            for other_node in self.node_info_list + [self]:
                 if node.name != other_node.name:
                     routes[node.name][other_node.name] = False
                 else:
                     routes[node.name][node.name] = True
 
-        for node in self.nodes:
+        for node in self.node_info_list:
             routes[self.name][node.name] = node.rq_ping()
 
-        self.routes = routes.copy()
+        self.route_lock.acquire_write()
+        self.route_dict = routes.copy()
+        self.route_lock.release_write()
 
-        for node in self.nodes:
+        for node in self.node_info_list:
             if routes[self.name][node.name]:
                 flag, nodes_routes = node.rq_route()
                 if not flag:
@@ -339,14 +365,22 @@ class NodeService(SecureSocketBaseService):
                         continue
                     for name_target, reachable in name_target_dict.items():
                         routes[name_start][name_target] = reachable
-        self.routes = routes.copy()
+
+        self.route_lock.acquire_write()
+        self.route_dict = routes.copy()
+        self.route_lock.release_write()
 
     def sv_route_query(self, target: str, start: str = None):
         if start is None:
             start = self.name
-        if target not in self.routes.keys() or start not in self.routes.keys():
+
+        self.route_lock.release_read()
+        route_dict = self.route_dict.copy()
+        self.route_lock.release_read()
+
+        if target not in route_dict.keys() or start not in route_dict.keys():
             return False, None
-        visited = {name: False for name in self.routes.keys()}
+        visited = {name: False for name in route_dict.keys()}
         queue = [(start, [start])]
         reachability = (
             {}
@@ -359,7 +393,7 @@ class NodeService(SecureSocketBaseService):
                 reachability[cur_name] = path
                 for neighbor_name in visited.keys():
                     if (
-                        self.routes[cur_name][neighbor_name]
+                        route_dict[cur_name][neighbor_name]
                         and not visited[neighbor_name]
                     ):
                         new_path = path + [neighbor_name]
@@ -375,7 +409,12 @@ class NodeService(SecureSocketBaseService):
         if target == self.name:
             # target is own
             return True, target_port
-        if self.routes[self.name][target]:
+
+        self.route_lock.release_read()
+        route_dict = self.route_dict.copy()
+        self.route_lock.release_read()
+
+        if route_dict[self.name][target]:
             # can reach directly
             # create port forward to target
             try:
@@ -458,7 +497,12 @@ class NodeService(SecureSocketBaseService):
         if target == self.name:
             # target is own
             return True
-        if self.routes[self.name][target]:
+
+        self.route_lock.release_read()
+        route_dict = self.route_dict.copy()
+        self.route_lock.release_read()
+
+        if route_dict[self.name][target]:
             # can reach directly
             # free forwarder and port to target
             forwarder_id = f"[bridge:{start}:{bridge_id}]:{self.name}->{target}"
@@ -498,7 +542,11 @@ class NodeService(SecureSocketBaseService):
             # target is own
             try:
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                return True, [result.returncode, result.stdout.strip(), result.stderr.strip()]
+                return True, [
+                    result.returncode,
+                    result.stdout.strip(),
+                    result.stderr.strip(),
+                ]
             except Exception as e:
                 return False, str(e)
         flag, path = self.sv_route_query(target)
@@ -567,7 +615,12 @@ class NodeService(SecureSocketBaseService):
         return [True, kwargs.get("_reqnode")], {}
 
     def do_route(self, *args, **kwargs):
-        return [self.routes], {}
+
+        self.route_lock.release_read()
+        route_dict = self.route_dict.copy()
+        self.route_lock.release_read()
+
+        return [route_dict], {}
 
     def do_route_bridge_up(self, *args, **kwargs):
         ret_args, ret_kwargs = [], {}
@@ -959,4 +1012,3 @@ class NodeService(SecureSocketBaseService):
         logger.error(f"[[{self}] file_recv: {msg}")
         socket.sendall(self.cipher.encrypt(b"0"))
         return [False, msg], ret_kwargs
-
