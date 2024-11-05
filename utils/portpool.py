@@ -7,8 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class PortPool:
-    """_summary_: PortPool
-    A pool of ports, maybe will be occupied by other programs
+    """PortPool: 
+    
+    A thread safe pool of ports, maybe the port in range will be occupied by other programs.
     """
 
     def __init__(self, min_port, max_port) -> None:
@@ -53,8 +54,9 @@ class PortPool:
 
 
 class KeepPortPool:
-    """_summary_: KeepPortPool
-    A pool of ports that will not be occupied by other programs
+    """KeepPortPool: 
+    
+    A thread safe pool of ports that the port added will not be occupied by other programs.
     """
 
     def __init__(self) -> None:
