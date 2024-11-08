@@ -7,7 +7,17 @@ import base64
 import logging
 
 
-class SSHAuthenticator:
+class Authenticator:
+    def authenticate(self, *args, **kwargs):
+        return False
+
+
+class ServerSessionHandler:
+    def handle(self, socket, addr):
+        return True, socket
+
+
+class SSHAuthenticator(Authenticator):
     def __init__(self, authorized_keys_dir: str = None, strict_mode: bool = True):
         self.authorized_keys_dir: str = authorized_keys_dir
         self.strict_mode: bool = strict_mode
@@ -23,9 +33,9 @@ class SSHAuthenticator:
             return {}
 
         authorized_keys = {}
-        try:
-            for filename_username in os.listdir(self.authorized_keys_dir):
-                file_path = os.path.join(self.authorized_keys_dir, filename_username)
+        for filename_username in os.listdir(self.authorized_keys_dir):
+            file_path = os.path.join(self.authorized_keys_dir, filename_username)
+            try:
                 if os.path.isfile(file_path):
                     with open(file_path, "r") as f:
                         for line in f:
@@ -40,8 +50,8 @@ class SSHAuthenticator:
                                     options,
                                     filename_username,
                                 )
-        except Exception as e:
-            logging.error(f"Error loading authorized keys: {file_path} -> {e}")
+            except Exception as e:
+                logging.error(f"Error loading authorized keys: {file_path} -> {e}")
         self.authorized_keys = authorized_keys
         return authorized_keys
 
@@ -88,3 +98,49 @@ class SSHAuthenticator:
             return True
         logging.warning(f"Authentication failed for user {username}")
         return False
+
+
+class SSHServerSessionHandler(ServerSessionHandler):
+
+    class SSHAuthenticationServer(paramiko.ServerInterface):
+        def __init__(self, authenticator: Authenticator):
+            self.authenticator = authenticator
+
+        def check_channel_request(self, kind: str, chanid: int):
+            if kind == "session":
+                return paramiko.OPEN_SUCCEEDED
+            return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+        def check_auth_password(self, username: str, password: str):
+            return (
+                paramiko.common.AUTH_SUCCESSFUL
+                if self.authenticator.authenticate(username=username, password=password)
+                else paramiko.common.AUTH_FAILED
+            )
+
+        def check_auth_publickey(self, username: str, key):
+            return (
+                paramiko.common.AUTH_SUCCESSFUL
+                if self.authenticator.authenticate(username=username, key=key)
+                else paramiko.common.AUTH_FAILED
+            )
+
+    def __init__(self, authenticator: Authenticator) -> None:
+        self.authenticator = authenticator
+
+    def handle(self, socket, addr):
+        transport = paramiko.Transport(socket)
+        transport.add_server_key(paramiko.RSAKey.generate(2048))
+        server = SSHServerSessionHandler.SSHAuthenticationServer(self.authenticator)
+        transport.start_server(server=server)
+
+        channel = transport.accept(20)
+        if channel is None:
+            logging.warning(f"Authentication failed for {addr}")
+            return False, transport
+
+        if transport.is_authenticated():
+            logging.info(f"Authentication successful for {addr}")
+            return True, channel
+        logging.warning(f"Authentication failed for {addr}")
+        return False, transport
