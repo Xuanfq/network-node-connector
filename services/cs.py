@@ -10,13 +10,15 @@ from utils.aes import AESCipherV2
 logger = logging.getLogger(__name__)
 
 #
-# client / server
+# client / server for single resource to multi-worker of internal program
+# 
+# Usage: 1. Django ...
 #
 
 BUFFER_SIZE_DEFAULT = 4096
 
 
-class SecureSocketBaseService(BaseService):
+class InternalSocketBaseService(BaseService):
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -35,7 +37,7 @@ class SecureSocketBaseService(BaseService):
         super().__init__()
 
     def __str__(self):
-        return f"SecureSocketBaseService:{self.host}:{self.port}"
+        return f"InternalSocketBaseService:{self.host}:{self.port}"
 
     def _handle_request(self, __reqcmd, *args, **kwargs):
         handler = getattr(self, f"do_{__reqcmd}", None)
@@ -159,7 +161,7 @@ class SecureSocketBaseService(BaseService):
         self.socket.close()
 
 
-class SecureSocketBaseClient:
+class InternalSocketBaseClient:
     def __init__(
         self,
         host,
@@ -181,7 +183,7 @@ class SecureSocketBaseClient:
         self.lock = Lock()
 
     def __str__(self):
-        return f"SecureSocketBaseClient:{self.host}:{self.port}"
+        return f"InternalSocketBaseClient:{self.host}:{self.port}"
 
     def connect(self) -> bool:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -248,8 +250,10 @@ class SecureSocketBaseClient:
                 self._send_message(self.index, __reqcmd, *args, **kwargs)
                 post_handle_flag = True
                 if post_handler:
-                    print('debu')
-                    post_handle_flag = post_handler(*post_handler_args, **post_handler_kwargs)
+                    print("debu")
+                    post_handle_flag = post_handler(
+                        *post_handler_args, **post_handler_kwargs
+                    )
                 response_data = self.socket.recv(4096)
                 if not response_data:
                     if not self.connect():

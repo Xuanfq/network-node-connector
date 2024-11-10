@@ -1,5 +1,5 @@
 import subprocess
-from services.cs import SecureSocketBaseService, SecureSocketBaseClient
+from services.cs import InternalSocketBaseService, InternalSocketBaseClient
 from services.pf import PortForwarderManager, PortForwarder
 from utils.portpool import PortPool
 from utils import file as fileutils
@@ -11,7 +11,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class NodeClient(SecureSocketBaseClient):
+class NodeClient(InternalSocketBaseClient):
     def __init__(
         self, name, host, port, username, password, key, local_node_name: str = ""
     ):
@@ -252,7 +252,7 @@ class NodeClient(SecureSocketBaseClient):
         return False, f"Client Error: {args}"
 
 
-class NodeService(SecureSocketBaseService):
+class NodeService(InternalSocketBaseService):
     def __init__(
         self,
         name: str = "HomeTopoNode",
