@@ -5,6 +5,7 @@ import pam
 import base64
 import logging
 import hashlib
+import socket
 
 
 class Authenticator:
@@ -13,8 +14,14 @@ class Authenticator:
 
 
 class ServerSessionHandler:
-    def handle(self, socket, addr):
+    def handle(self, socket: socket, addr: tuple[str, int] | list[str, int]):
         return True, socket
+
+
+class ClientSessionGenerator:
+    def generate(self, host, port, username: None, password=None, pkey=None):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.connect((self.host, self.port))
 
 
 class PasswordEncryptor:
@@ -113,7 +120,9 @@ class SSHAuthenticator(Authenticator):
                                     key_type = parts[0]
                                     key_data = parts[1]
                                     options = parts[2:] if len(parts) > 2 else []
-                                    key = paramiko.RSAKey(data=base64.b64decode(key_data))
+                                    key = paramiko.RSAKey(
+                                        data=base64.b64decode(key_data)
+                                    )
                                     authorized_keys[key_data] = (
                                         key,
                                         options,
@@ -216,7 +225,7 @@ class SSHServerSessionAuthHandler(ServerSessionHandler):
     def __init__(self, authenticator: Authenticator) -> None:
         self.authenticator = authenticator
 
-    def handle(self, socket, addr):
+    def handle(self, socket: socket, addr: tuple[str, int] | list[str, int]):
         transport = paramiko.Transport(socket)
         transport.add_server_key(paramiko.RSAKey.generate(2048))
         server = SSHServerSessionAuthHandler.SSHAuthenticationServer(self.authenticator)
@@ -232,3 +241,16 @@ class SSHServerSessionAuthHandler(ServerSessionHandler):
             return True, channel
         logging.warning(f"Authentication failed for {addr}")
         return False, transport
+
+
+class SSHClientSessionGenerator(ClientSessionGenerator):
+    
+    def generate(self, host, port, username: None, password=None, pkey=None):
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(host, port, username=username, password=password, pkey=pkey)
+            channel = client.get_transport().open_channel("session")
+            return True, channel
+        except Exception as e:
+            return False, None
