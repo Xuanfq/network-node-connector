@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 # 
 # Service ABC
 # 
+# Usage: Once start BaseDaemonService, 
+#           it will find all the sub-base-service and start the it.
+# 
 
 class BaseService(ABC):
     def __init__(self) -> None:
