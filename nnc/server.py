@@ -1,270 +1,49 @@
 import subprocess
-from services.cs import InternalSocketBaseService, InternalSocketBaseClient
-from services.pf import PortForwarderManager, PortForwarder
+from nnc.client import NodeClient
+from nnc.auth import SSHAuthenticator, SSHServerSessionAuthHandler
+
+from services.abc import BaseService
+from services.pf import PortForwarderManager
 from utils.portpool import PortPool
 from utils import file as fileutils
 from utils.lock import ReadWriteLock
+from utils.aes import AESCipherV2
+from threading import Thread, Lock
+import paramiko
+import socket
+import time
 import json
 import os
 import logging
 
-logger = logging.getLogger(__name__)
+BUFFER_SIZE_DEFAULT = 4096
 
 
-class NodeClient(InternalSocketBaseClient):
-    def __init__(
-        self, name, host, port, username, password, key, local_node_name: str = ""
-    ):
-        self.name = name
-        self.local_node_name = local_node_name
-        super().__init__(host, port, username, password, key)
-
-    def __str__(self):
-        return f"NodeClient:{self.name}:{self.host}:{self.port}"
-
-    def _send_request(self, __reqcmd, *args, **kwargs) -> tuple[bool, list, dict]:
-        return super()._send_request(
-            __reqcmd, *args, **kwargs, _reqnode=self.local_node_name
-        )
-
-    def rq_ping(self):
-        """
-        name: your node server name
-        """
-        try:
-            flag, args, kwargs = self._send_request("ping")
-            if flag and args[0]:
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"[{self}] Error in req_ping: {e}")
-            return False
-
-    def rq_route(self):
-        client_flag, args, kwargs = self._send_request("route")
-        if client_flag:
-            return True, args[0]
-        return False, f"Client Error: {args}"
-
-    def rq_route_bridge_up(
-        self, target: str, target_port: int, start: str, bridge_id: str | int
-    ):
-        client_flag, args, kwargs = self._send_request(
-            "route_bridge_up",
-            target=target,
-            target_port=target_port,
-            start=start,
-            bridge_id=bridge_id,
-        )
-        if client_flag:
-            return args[0], args[1]  # flag, port
-        return False, f"Client Error: {args}"
-
-    def rq_route_bridge_down(
-        self, target: str, target_port: int, start: str, bridge_id: str | int
-    ):
-        client_flag, args, kwargs = self._send_request(
-            "route_bridge_down",
-            target=target,
-            target_port=target_port,
-            start=start,
-            bridge_id=bridge_id,
-        )
-        if client_flag:
-            return args[0]  # Flag
-        return False
-
-    def rq_cmd(self, cmd: str, target: str, origin: str):
-        flag, args, kwargs = self._send_request(
-            "cmd",
-            cmd=cmd,
-            target=target,
-            origin=origin,
-        )
-        if flag:
-            return args[0], args[1]  # args: returncode(int) and output(str)
-        return False, f"Client Error: {args}"
-
-    def rq_file_send(
-        self,
-        target: str,
-        source_filepath: str,
-        target_filepath: str,
-        origin: str = None,
-    ):
-        """Send file/folder to target node
-
-        Keyword arguments:
-        target -- target node name
-        origin -- origin node name, that is local node name
-        source_filepath -- file/folder to be send
-        target_filepath -- the path that file/folder to be stored
-        Return: flag, message
-        """
-        if not origin:
-            origin = self.local_node_name
-        flag, files = fileutils.get_files(source_filepath)
-        if not flag:
-            return flag, files
-
-        def post_handler(files):
-            # send folders first
-            for f in files:
-                type = f[2]
-                filename = f[1]
-                filepath = f[0]
-                filesize = os.path.getsize(filepath)
-                if type == "D":
-                    msg = json.dumps(
-                        {"type": type, "filename": filename, "filesize": filesize}
-                    )
-                    self.socket.sendall(self.cipher.encrypt(msg.encode()))
-                    item_resp = self.cipher.decrypt(self.socket.recv(self.buffer_size))
-                    if item_resp != "ACK":
-                        return False
-            # then send files
-            for f in files:
-                type = f[2]
-                filename = f[1]
-                filepath = f[0]
-                filesize = os.path.getsize(filepath)
-                if type == "F":
-                    msg = json.dumps(
-                        {"type": type, "filename": filename, "filesize": filesize}
-                    )
-                    self.socket.sendall(self.cipher.encrypt(msg.encode()))
-                    item_resp = self.cipher.decrypt(self.socket.recv(self.buffer_size))
-                    if item_resp != "ACK":
-                        return False
-                    try:
-                        with open(filepath, "rb") as f:
-                            while True:
-                                data = f.read(self.buffer_size)
-                                if not data:
-                                    break
-                                self.socket.sendall(data)
-                        # todo: check md5sum
-                        item_resp = self.cipher.decrypt(
-                            self.socket.recv(self.buffer_size)
-                        )
-                        if item_resp != "ACK":
-                            return False
-                    except Exception as e:
-                        logger.error(f"[{self}] do file send: {e}")
-                        return False
-            pass
-
-        flag, args, kwargs = self._send_request(
-            "file_send",
-            target=target,
-            origin=origin,
-            path=target_filepath,
-            filenumber=len(files),
-            __post_handler=post_handler,
-            __post_handler_args=[files],
-            __post_handler_kwargs={},
-        )
-        if flag:
-            return args[0], args[1]
-        return False, f"Client Error: {args}"
-
-    def rq_file_recv(
-        self,
-        target: str,
-        source_filepath: str,
-        target_filepath: str,
-        origin: str = None,
-    ):
-        """Recv file/folder from target node
-
-        Keyword arguments:
-        target -- target node name
-        origin -- origin node name, that is local node name
-        source_filepath -- file/folder to be send
-        target_filepath -- the path that file/folder to be stored
-        Return: flag, message
-        """
-        if not origin:
-            origin = self.local_node_name
-
-        os.mkdir(target_filepath)
-
-        def post_handler(target_filepath):
-            filenumber = int(self.cipher.decrypt(self.socket.recv(self.buffer_size)))
-            is_item_resp = False
-            try:
-                for i in range(filenumber):
-                    is_item_resp = False
-                    file_item = json.loads(
-                        self.cipher.decrypt(self.socket.recv(self.buffer_size))
-                    )
-                    type = file_item.get("type")
-                    filename = file_item.get("filename")
-                    filesize = file_item.get("filesize")
-                    filepath = os.path.join(target_filepath, filename)
-                    if type == "D":
-                        os.mkdir(filepath)
-                        self.socket.sendall(self.cipher.encrypt(b"ACK"))
-                        is_item_resp = True
-                    elif type == "F":
-                        self.socket.sendall(self.cipher.encrypt(b"ACK"))
-                        with open(filepath, "wb") as f:
-                            received_size = 0
-                            while received_size < filesize:
-                                data = self.socket.recv(
-                                    min(filesize - received_size, self.buffer_size)
-                                )
-                                if not data:
-                                    break
-                                f.write(data)
-                                received_size += len(data)
-                            self.socket.sendall(self.cipher.encrypt(b"ACK"))
-                            is_item_resp = True
-                    else:
-                        self.socket.sendall(
-                            self.cipher.encrypt(b"Error File Sending Protocol")
-                        )
-                        is_item_resp = True
-                        raise Exception("Error File Sending Protocol")
-            except Exception as e:
-                logger.error(f"[{self}] do file send: {e}")
-                if not is_item_resp:
-                    try:
-                        self.socket.sendall(
-                            self.cipher.encrypt(f"Local:{self}:{e}".encode())
-                        )
-                    except Exception as ex:
-                        pass
-                return False
-            return True
-
-        flag, args, kwargs = self._send_request(
-            "file_recv",
-            target=target,
-            origin=origin,
-            path=source_filepath,
-            __post_handler=post_handler,
-            __post_handler_args=[target_filepath],
-            __post_handler_kwargs={},
-        )
-        if flag:
-            return args[0], args[1]
-        return False, f"Client Error: {args}"
-
-
-class NodeService(InternalSocketBaseService):
+class NodeService(BaseService):
     def __init__(
         self,
-        name: str = "HomeTopoNode",
-        host: str = "127.0.0.1",
-        port: int = 10000,
-        username: str = "",
-        password: str = "",
-        key: str = "",
-        port_pool_range: tuple = (11000, 12000),
+        name: str,
+        host: str,
+        port: int,
+        username: str,
+        pkey: str | bytes,
+        authenticator: SSHAuthenticator,
         is_block_unknown_node: bool = True,
+        port_pool_range: tuple = (11000, 12000),
+        default_buffer_size: int = BUFFER_SIZE_DEFAULT,
     ):
         self.name = name
+        self.host = host
+        self.port = port
+        # security
+        self.username = username
+        self.pkey = (
+            paramiko.RSAKey.from_private_key_file(pkey)
+            if os.path.isfile(pkey)
+            else pkey
+        )
+        self.authenticator = authenticator
+        self.authhandler = SSHServerSessionAuthHandler(authenticator=authenticator)
         self.is_block_unknown_node = is_block_unknown_node
         # other nodes info
         self.node_info_list: list[NodeClient] = []
@@ -272,13 +51,39 @@ class NodeService(InternalSocketBaseService):
         self.node_info_lock = ReadWriteLock()
         # route_dict[nodename][nodename] = True/False
         self.route_dict: dict[str, dict[str, bool]] = {}
-        self.route_lock = ReadWriteLock()
+        # common
+        self.buffer_size = default_buffer_size
+        # other
         self.pfpp = PortPool(*port_pool_range)
         self.pfm = PortForwarderManager()
-        super().__init__(host, port, username, password, key)
+        self.route_lock = ReadWriteLock()
+        super().__init__()
 
     def __str__(self):
         return f"NodeService:{self.name}:{self.host}:{self.port}"
+
+    def _encode_message(self, __index, __reqcmd, __cipher, *args, **kwargs) -> bytes:
+        return __cipher.encrypt(
+            json.dumps(
+                {
+                    "index": __index,
+                    "timestamp": int(time.time() * 1000),
+                    "reqcmd": __reqcmd,
+                    "args": list(args),
+                    "kwargs": kwargs,
+                }
+            ).encode("utf-8")
+        )
+
+    def _decode_message(self, __message, __cipher) -> tuple[int, int, str, list, dict]:
+        data = json.loads(__cipher.decrypt(__message))
+        return (
+            data["index"],
+            data["timestamp"],
+            data["reqcmd"],
+            data.get("args", []),
+            data.get("kwargs", {}),
+        )
 
     def _handle_client(self, conn, addr):
         if self.is_block_unknown_node:
@@ -286,27 +91,116 @@ class NodeService(InternalSocketBaseService):
             if addr[0] not in [node.host for node in self.node_info_list]:
                 conn.close()
                 return
-        return super()._handle_client(conn, addr)
+        logging.debug(f"[{self}] Connected by {addr}")
+        try:
+            flag, channel = self.authhandler.handle(socket=conn, addr=addr)
+            if not flag:
+                raise Exception(f"Authentication failed!")
+            key = os.urandom(32)
+            cipher = AESCipherV2(key=key)
+            channel.sendall(key)
+            serial = 0
+            while True:
+                data = channel.recv(self.buffer_size)
+                if not data:
+                    break
+                index, timestamp, reqcmd, args, kwargs = self._decode_message(
+                    data, cipher
+                )
+                if index == serial:
+                    if serial == 9999:
+                        serial = 0
+                    else:
+                        serial += 1
+                else:
+                    break
+                logging.debug(
+                    f"[{self}][{addr}][{kwargs.get('_reqnode')}] Received {index}: {reqcmd}, Args: {args}, Kwargs: {kwargs}"
+                )
+                ret = self._handle_client_request(
+                    reqcmd,
+                    *args,
+                    **kwargs,
+                    _address=addr,
+                    _socket=channel,
+                    _cipher=cipher,
+                )
+                if ret is not None:
+                    if (
+                        len(ret) == 2
+                        and (type(ret[0]) == tuple or type(ret[0]) == list)
+                        and type(ret[1]) == dict
+                    ):
+                        res_args, res_kwargs = ret
+                    elif type(ret) == dict:
+                        res_args, res_kwargs = [], ret
+                    elif len(ret) > 0:
+                        res_args, res_kwargs = ret, {}
+                    else:
+                        res_args, res_kwargs = [], {}
+                else:
+                    res_args, res_kwargs = [], {}
+                logging.debug(
+                    f"[{self}][{addr}][{kwargs.get('_reqnode')}] Response {index}: Args: {res_args}, Kwargs: {res_kwargs}"
+                )
+                channel.sendall(
+                    self._encode_message(index, reqcmd, cipher, *res_args, **res_kwargs)
+                )
+        except Exception as e:
+            logging.error(f"[{self}][{addr}][{kwargs.get('_reqnode')}] Error {index}: {e}")
+        finally:
+            channel.close()
 
-    def _handle_request(self, __reqcmd, *args, **kwargs):
+    def _handle_client_request(self, __reqcmd, *args, **kwargs):
         if self.is_block_unknown_node:
             # block unknown node name
-            if "_reqnode" not in kwargs or kwargs["_reqnode"] not in [
-                node.name for node in self.node_info_list
-            ]:
+            if (
+                "_reqnode" not in kwargs
+                or kwargs["_reqnode"] not in [node.name for node in self.node_info_list]
+                or self.node_info_dict[kwargs["_reqnode"]].host != kwargs["_address"][0]
+            ):
                 raise Exception(
                     f"Unknown Request Node: _reqnode={kwargs.get('_reqnode')}"
                 )
-        return super()._handle_request(__reqcmd, *args, **kwargs)
+        handler = getattr(self, f"do_{__reqcmd}", None)
+        if handler:
+            # handler should return tuple[args:tuple|list, kwargs:dict]
+            return handler(*args, **kwargs)
+        return args, kwargs
 
-    def sv_node_add(self, name, host, port, username, password, key):
+    def run(self) -> None:
+        self._running = True
+        while (
+            not self._running_stop_event.is_set()
+            and not self.host
+            and not self.port
+            and not self.key
+        ):
+            # wait for the server to be ready
+            time.sleep(0.5)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind((self.host, self.port))
+        self.socket.listen()
+        while not self._running_stop_event.is_set():
+            self.run_main_loop()
+        self._running = False
+
+    def run_main_loop(self) -> None:
+        conn, addr = self.socket.accept()
+        client_thread = Thread(target=self._handle_client, args=(conn, addr))
+        client_thread.start()
+
+    def stop(self) -> None:
+        super().stop()
+        self.socket.close()
+
+    def sv_node_add(self, name, host, port):
         nodeinfo = NodeClient(
             name,
             host,
             port,
-            username,
-            password,
-            key,
+            username=self.username,
+            pkey=self.pkey,
             local_node_name=self.name,
         )
         self.node_info_lock.acquire_write()
@@ -330,9 +224,6 @@ class NodeService(InternalSocketBaseService):
             name,
             host=node_base.host,
             port=node_base.port,
-            username=node_base.username,
-            password=node_base.password,
-            key=node_base.key,
             local_node_name=self.name,
         )
         return node
@@ -433,13 +324,13 @@ class NodeService(InternalSocketBaseService):
                     remote_port=target_port,
                 )
                 self.pfm.start_forwarder(forwarder_id)
-                logger.info(
+                logging.info(
                     f"[{self}] route bridge up: [bridge:{start}:{bridge_id}]:{self.name}->{target} created"
                 )
                 return True, local_port
             except Exception as e:
                 msg = f"failed to set up forward on self node {self.name} to reach {target}:{target_port}: {e}"
-                logger.error(f"[{self}] route bridge up: {msg}")
+                logging.error(f"[{self}] route bridge up: {msg}")
                 try:
                     self.pfpp.release(local_port)
                 except Exception as e:
@@ -463,9 +354,9 @@ class NodeService(InternalSocketBaseService):
             )
             if not flag:
                 msg = f"failed to require set up bridge on node {bridge_node_name} to reach {target}:{target_port}. node {bridge_node_name} return: {remote_port}"
-                logger.error(f"[{self}] route bridge up: {msg}")
+                logging.error(f"[{self}] route bridge up: {msg}")
                 return False, msg
-            logger.info(
+            logging.info(
                 f"[{self}] route bridge up: [bridge:{start}:{bridge_id}] created by remote node {bridge_node_name}, remote port {remote_port}"
             )
             # set up local bridge
@@ -486,7 +377,7 @@ class NodeService(InternalSocketBaseService):
                 return False, local_port
             return True, local_port
         msg = f"no path to reach {target}:{target_port}."
-        logger.error(f"[{self}] route bridge up: {msg}")
+        logging.error(f"[{self}] route bridge up: {msg}")
         return False, msg
 
     def sv_route_bridge_down(
@@ -526,7 +417,7 @@ class NodeService(InternalSocketBaseService):
                 )
         if forwarder is not None:
             # free self forwarder and port
-            logger.info(f"[{self}] route bridge down: delete {forwarder}")
+            logging.info(f"[{self}] route bridge down: delete {forwarder}")
             try:
                 self.pfpp.release(forwarder.local_port)
             except Exception as e:
@@ -558,7 +449,7 @@ class NodeService(InternalSocketBaseService):
                 return False, result
             return True, result
         msg = f"no path to reach {target}."
-        logger.error(f"[{self}] cmd: {msg}")
+        logging.error(f"[{self}] cmd: {msg}")
         return False, msg
 
     def sv_file_send(
@@ -579,7 +470,7 @@ class NodeService(InternalSocketBaseService):
             )
             return flag, msg
         msg = f"no path to reach {target}."
-        logger.error(f"[{self}] cmd: {msg}")
+        logging.error(f"[{self}] cmd: {msg}")
         return False, msg
 
     def sv_file_recv(
@@ -600,12 +491,12 @@ class NodeService(InternalSocketBaseService):
             )
             return flag, msg
         msg = f"no path to reach {target}."
-        logger.error(f"[{self}] cmd: {msg}")
+        logging.error(f"[{self}] cmd: {msg}")
         return False, msg
 
     def do_ping(self, *args, **kwargs):
         # debug ----start
-        if logger.getEffectiveLevel() == logging.DEBUG:
+        if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
             node_name = kwargs.get("_reqnode")
             if self.name == "node1" and node_name == "node3":
                 return [False, node_name], {}
@@ -672,6 +563,7 @@ class NodeService(InternalSocketBaseService):
         filenumber = kwargs.get("filenumber", None)
         address = kwargs.get("_address", None)
         socket = kwargs.get("_socket", None)
+        cipher = kwargs.get("_cipher", None)
         if not (target and origin and path and filenumber):
             return [False, "Invalid Params"], {}
         if target == self.name:
@@ -682,7 +574,7 @@ class NodeService(InternalSocketBaseService):
                 for i in range(filenumber):
                     is_item_resp = False
                     file_item = json.loads(
-                        self.cipher.decrypt(socket.recv(self.buffer_size))
+                        cipher.decrypt(socket.recv(self.buffer_size))
                     )
                     type = file_item.get("type")
                     filename = file_item.get("filename")
@@ -690,10 +582,10 @@ class NodeService(InternalSocketBaseService):
                     filepath = os.path.join(path, filename)
                     if type == "D":
                         os.mkdir(filepath)
-                        socket.sendall(self.cipher.encrypt(b"ACK"))
+                        socket.sendall(cipher.encrypt(b"ACK"))
                         is_item_resp = True
                     elif type == "F":
-                        socket.sendall(self.cipher.encrypt(b"ACK"))
+                        socket.sendall(cipher.encrypt(b"ACK"))
                         with open(filepath, "wb") as f:
                             received_size = 0
                             while received_size < filesize:
@@ -704,19 +596,19 @@ class NodeService(InternalSocketBaseService):
                                     break
                                 f.write(data)
                                 received_size += len(data)
-                            socket.sendall(self.cipher.encrypt(b"ACK"))
+                            socket.sendall(cipher.encrypt(b"ACK"))
                             is_item_resp = True
                     else:
-                        socket.sendall(self.cipher.encrypt(b"NOACK"))
+                        socket.sendall(cipher.encrypt(b"NOACK"))
                         is_item_resp = True
                         ret_args = [False, "Error File Sending Protocol"]
                         raise Exception("Error File Sending Protocol")
                 # todo: check md5sum
             except Exception as e:
-                logger.error(f"[{self}] do file send: {e}")
+                logging.error(f"[{self}] do file send: {e}")
                 if not is_item_resp:
                     try:
-                        socket.sendall(self.cipher.encrypt(b"NOACK"))
+                        socket.sendall(cipher.encrypt(b"NOACK"))
                     except Exception as ex:
                         pass
                 return [False, str(e)], ret_kwargs
@@ -802,7 +694,7 @@ class NodeService(InternalSocketBaseService):
                                 raise Exception("Error File Sending Protocol")
                     # todo: check md5sum
                 except Exception as e:
-                    logger.error(f"[{localservice}] jp do file send: {e}")
+                    logging.error(f"[{localservice}] jp do file send: {e}")
                     if not is_item_resp:
                         try:
                             localservice.sendall(localservice.cipher.encrypt(b"NOACK"))
@@ -831,7 +723,7 @@ class NodeService(InternalSocketBaseService):
             # if flag:
             return args, kwargs
         msg = f"no path to reach {target}."
-        logger.error(f"[[{self}] file_send: {msg}")
+        logging.error(f"[[{self}] file_send: {msg}")
         return [False, msg], ret_kwargs
 
     def do_file_recv(self, *args, **kwargs):
@@ -841,15 +733,16 @@ class NodeService(InternalSocketBaseService):
         path = kwargs.get("path", None)
         address = kwargs.get("_address", None)
         socket = kwargs.get("_socket", None)
+        cipher = kwargs.get("_cipher", None)
         if not (target and origin and path):
-            socket.sendall(self.cipher.encrypt(b"0"))
+            socket.sendall(cipher.encrypt(b"0"))
             return [False, "Invalid Params"], ret_kwargs
         if target == self.name:
             # target is own
             flag, files = fileutils.get_files(path)
             if not flag:
                 return [flag, files], ret_kwargs
-            socket.sendall(self.cipher.encrypt(str(len(files)).encode()))
+            socket.sendall(cipher.encrypt(str(len(files)).encode()))
             for f in files:
                 type = f[2]
                 filename = f[1]
@@ -859,8 +752,8 @@ class NodeService(InternalSocketBaseService):
                     msg = json.dumps(
                         {"type": type, "filename": filename, "filesize": filesize}
                     )
-                    socket.sendall(self.cipher.encrypt(msg.encode()))
-                    item_resp = self.cipher.decrypt(socket.recv(self.buffer_size))
+                    socket.sendall(cipher.encrypt(msg.encode()))
+                    item_resp = cipher.decrypt(socket.recv(self.buffer_size))
                     if item_resp != "ACK":
                         return [False, item_resp], ret_kwargs
             # then send files
@@ -873,8 +766,8 @@ class NodeService(InternalSocketBaseService):
                     msg = json.dumps(
                         {"type": type, "filename": filename, "filesize": filesize}
                     )
-                    socket.sendall(self.cipher.encrypt(msg.encode()))
-                    item_resp = self.cipher.decrypt(socket.recv(self.buffer_size))
+                    socket.sendall(cipher.encrypt(msg.encode()))
+                    item_resp = cipher.decrypt(socket.recv(self.buffer_size))
                     if item_resp != "ACK":
                         return [False, item_resp], ret_kwargs
                     try:
@@ -885,11 +778,11 @@ class NodeService(InternalSocketBaseService):
                                     break
                                 socket.sendall(data)
                         # todo: check md5sum
-                        item_resp = self.cipher.decrypt(socket.recv(self.buffer_size))
+                        item_resp = cipher.decrypt(socket.recv(self.buffer_size))
                         if item_resp != "ACK":
                             return [False, item_resp], ret_kwargs
                     except Exception as e:
-                        logger.error(f"[{self}] do file send: {e}")
+                        logging.error(f"[{self}] do file send: {e}")
                         return [False, item_resp], ret_kwargs
             return [True, None], ret_kwargs
         flag, node_route_path = self.sv_route_query(target)
@@ -980,7 +873,7 @@ class NodeService(InternalSocketBaseService):
                                 raise Exception("Error File Sending Protocol")
                     # todo: check md5sum
                 except Exception as e:
-                    logger.error(f"[{localservice}] jp do file send: {e}")
+                    logging.error(f"[{localservice}] jp do file send: {e}")
                     if not is_item_resp:
                         try:
                             remotesocket.sendall(
@@ -1009,6 +902,6 @@ class NodeService(InternalSocketBaseService):
             # if flag:
             return args, kwargs
         msg = f"no path to reach {target}."
-        logger.error(f"[[{self}] file_recv: {msg}")
-        socket.sendall(self.cipher.encrypt(b"0"))
+        logging.error(f"[[{self}] file_recv: {msg}")
+        socket.sendall(cipher.encrypt(b"0"))
         return [False, msg], ret_kwargs
