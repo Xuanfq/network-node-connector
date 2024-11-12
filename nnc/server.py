@@ -147,7 +147,9 @@ class NodeService(BaseService):
                     self._encode_message(index, reqcmd, cipher, *res_args, **res_kwargs)
                 )
         except Exception as e:
-            logging.error(f"[{self}][{addr}][{kwargs.get('_reqnode')}] Error {index}: {e}")
+            logging.error(
+                f"[{self}][{addr}][{kwargs.get('_reqnode')}] Error {index}: {e}"
+            )
         finally:
             channel.close()
 
@@ -220,10 +222,14 @@ class NodeService(BaseService):
         """
 
         node_base = self.node_info_dict.get(name, None)
+        if not node_base:
+            return None
         node = NodeClient(
             name,
             host=node_base.host,
             port=node_base.port,
+            username=self.username,
+            pkey=self.pkey,
             local_node_name=self.name,
         )
         return node
@@ -296,6 +302,12 @@ class NodeService(BaseService):
     def sv_route_bridge_up(
         self, target: str, target_port: int, start: str, bridge_id: str | int
     ):
+        if self.is_block_unknown_node:
+            if self.sv_node_get(start) is None:
+                return False, "Unknown Start Node"
+            elif self.sv_node_get(target) is None:
+                return False, "Unknown Target Node"
+
         # TCP only
         if target == self.name:
             # target is own
@@ -311,11 +323,11 @@ class NodeService(BaseService):
             try:
                 target_node = self.sv_node_get(target)
                 target_host = target_node.host
-                local_port = self.pfpp.allocate()
                 forwarder_id = f"[bridge:{start}:{bridge_id}]:{self.name}->{target}"
                 forwarder = self.pfm.get_forwarder(forwarder_id)
                 if forwarder is not None:
                     return True, forwarder.local_port
+                local_port = self.pfpp.allocate()
                 self.pfm.new_forwarder(
                     forwarder_id,
                     local_host=self.host,
@@ -323,7 +335,6 @@ class NodeService(BaseService):
                     remote_host=target_host,
                     remote_port=target_port,
                 )
-                self.pfm.start_forwarder(forwarder_id)
                 logging.info(
                     f"[{self}] route bridge up: [bridge:{start}:{bridge_id}]:{self.name}->{target} created"
                 )
@@ -383,6 +394,12 @@ class NodeService(BaseService):
     def sv_route_bridge_down(
         self, target: str, target_port: int, start: str, bridge_id: str | int
     ):
+        if self.is_block_unknown_node:
+            if self.sv_node_get(start) is None:
+                return False, "Unknown Start Node"
+            elif self.sv_node_get(target) is None:
+                return False, "Unknown Target Node"
+
         target_node = self.sv_node_get(target)
         forwarder = None
         if target == self.name:
