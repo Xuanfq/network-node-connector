@@ -146,8 +146,9 @@ class PortForwarder:
 
 
 class PortForwarderManager:
-    def __init__(self, save_path=None):
+    def __init__(self, save_path: str = None, auto_save: bool = True):
         self.save_path = save_path
+        self.auto_save = auto_save
         self.forwarders: dict[str, PortForwarder] = {}
         self.lock = threading.Lock()
         if self.save_path:
@@ -222,6 +223,8 @@ class PortForwarderManager:
             if forwarder.id in self.forwarders:
                 raise ValueError(f"Forwarder with ID {forwarder.id} already exists")
             self.forwarders[forwarder.id] = forwarder
+        if self.auto_save and self.save_path:
+            self.save()
 
     def new_forwarder(
         self,
@@ -242,6 +245,8 @@ class PortForwarderManager:
             self.forwarders[id] = forwarder
             if auto_start:
                 forwarder.start()
+        if self.auto_save and self.save_path:
+            self.save()
 
     def get_forwarder(self, id) -> PortForwarder:
         with self.lock:
@@ -270,3 +275,5 @@ class PortForwarderManager:
                 del self.forwarders[id]
             else:
                 raise ValueError(f"Forwarder with ID {id} does not exist")
+        if self.auto_save and self.save_path:
+            self.save()

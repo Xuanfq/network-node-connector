@@ -29,8 +29,10 @@ class NodeService(BaseService):
         pkey: str | bytes,
         authenticator: SSHAuthenticator,
         is_block_unknown_node: bool = True,
-        port_pool_range: tuple = (11000, 12000),
+        pf_port_pool_range: tuple = (11000, 12000),
+        pf_configuration_path: str = None,
         default_buffer_size: int = BUFFER_SIZE_DEFAULT,
+        **kwargs,
     ):
         self.name = name
         self.host = host
@@ -54,8 +56,8 @@ class NodeService(BaseService):
         # common
         self.buffer_size = default_buffer_size
         # other
-        self.pfpp = PortPool(*port_pool_range)
-        self.pfm = PortForwarderManager()
+        self.pfpp = PortPool(*pf_port_pool_range)
+        self.pfm = PortForwarderManager(save_path=pf_configuration_path)
         self.route_lock = ReadWriteLock()
         super().__init__()
 
