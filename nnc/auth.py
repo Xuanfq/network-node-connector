@@ -67,6 +67,8 @@ class SSHAuthenticator(Authenticator):
         user_pass_local_root_only: bool = True,
         authorized_pkeys_dir: str = None,
         strict_mode: bool = True,
+        *args,
+        **kwargs,
     ):
         """SSH Protocol Authenticator
 
@@ -244,7 +246,7 @@ class SSHServerSessionAuthHandler(ServerSessionHandler):
 
 
 class SSHClientSessionGenerator(ClientSessionGenerator):
-    
+
     def generate(self, host, port, username: None, password=None, pkey=None):
         try:
             client = paramiko.SSHClient()

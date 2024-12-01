@@ -19,9 +19,11 @@ class NodeClient:
         port,
         username=None,
         password=None,
-        pkey=None,
+        publickey=None,
         local_node_name: str = "",
         default_buffer_size: int = BUFFER_SIZE_DEFAULT,
+        *args,
+        **kwargs,
     ):
         self.name = name
         self.host = host
@@ -30,7 +32,7 @@ class NodeClient:
         # auth
         self.username = username
         self.password = password
-        self.pkey = pkey
+        self.publickey = publickey
         # common
         self.buffer_size = default_buffer_size
         # other
@@ -50,7 +52,7 @@ class NodeClient:
                 port=self.port,
                 username=self.username,
                 password=self.password,
-                pkey=self.pkey,
+                pkey=self.publickey,
             )
             if not flag:
                 return False
@@ -148,7 +150,7 @@ class NodeClient:
         """
         try:
             flag, args, kwargs = self._send_request("ping")
-            print(flag,args,kwargs)
+            print(flag, args, kwargs)
             if flag and args[0]:
                 return True
             return False

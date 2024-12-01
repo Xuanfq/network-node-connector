@@ -9,6 +9,7 @@ from utils import file as fileutils
 from utils.lock import ReadWriteLock
 from utils.aes import AESCipherV2
 from threading import Thread, Lock
+from io import StringIO
 import paramiko
 import socket
 import time
@@ -26,12 +27,13 @@ class NodeService(BaseService):
         host: str,
         port: int,
         username: str,
-        pkey: str | bytes,
+        privatekey: str | bytes,
         authenticator: SSHAuthenticator,
         is_block_unknown_node: bool = True,
         pf_port_pool_range: tuple = (11000, 12000),
         pf_configuration_path: str = None,
         default_buffer_size: int = BUFFER_SIZE_DEFAULT,
+        *args,
         **kwargs,
     ):
         self.name = name
@@ -39,10 +41,10 @@ class NodeService(BaseService):
         self.port = port
         # security
         self.username = username
-        self.pkey = (
-            paramiko.RSAKey.from_private_key_file(pkey)
-            if os.path.isfile(pkey)
-            else pkey
+        self.publickey = (
+            paramiko.RSAKey.from_private_key_file(privatekey)
+            if os.path.isfile(privatekey)
+            else paramiko.RSAKey.from_private_key(StringIO(privatekey))
         )
         self.authenticator = authenticator
         self.authhandler = SSHServerSessionAuthHandler(authenticator=authenticator)
@@ -204,7 +206,7 @@ class NodeService(BaseService):
             host,
             port,
             username=self.username,
-            pkey=self.pkey,
+            publickey=self.publickey,
             local_node_name=self.name,
         )
         self.node_info_lock.acquire_write()
@@ -231,7 +233,7 @@ class NodeService(BaseService):
             host=node_base.host,
             port=node_base.port,
             username=self.username,
-            pkey=self.pkey,
+            publickey=self.publickey,
             local_node_name=self.name,
         )
         return node
