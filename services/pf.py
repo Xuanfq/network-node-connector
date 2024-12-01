@@ -163,7 +163,7 @@ class PortForwarderManager:
         if not save_path:
             save_path = self.save_path
         if not os.path.isfile(save_path):
-            raise ValueError("Error Save Path, Should be a File Path")
+            raise ValueError("Error Save Path, Should be a File Path. Or File Path Not Exist")
         data = {}
         try:
             with open(save_path, "r", encoding="utf-8") as f:
@@ -193,7 +193,7 @@ class PortForwarderManager:
                     self.forwarders[id] = pf
                     pf.start()
         except Exception as e:
-            logging.error(f"PortForwarderManager Saving Error: {e}")
+            logging.error(f"PortForwarderManager Loading Error: {e}")
 
     def save(self, save_path=None):
         if not save_path and not self.save_path:
