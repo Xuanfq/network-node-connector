@@ -1,7 +1,7 @@
 import subprocess
 from nnc.client import NodeClient
 from nnc.auth import SSHAuthenticator, SSHServerSessionAuthHandler
-
+from services.daemon import Daemon
 from services.abc import BaseService
 from services.pf import PortForwarderManager
 from utils.portpool import PortPool
@@ -61,6 +61,8 @@ class NodeService(BaseService):
         self.pfpp = PortPool(*pf_port_pool_range)
         self.pfm = PortForwarderManager(save_path=pf_configuration_path)
         self.route_lock = ReadWriteLock()
+        self.args = args
+        self.kwargs = kwargs
         super().__init__()
 
     def __str__(self):
@@ -173,6 +175,20 @@ class NodeService(BaseService):
             # handler should return tuple[args:tuple|list, kwargs:dict]
             return handler(*args, **kwargs)
         return args, kwargs
+
+    def daemon(self):
+        nscls = self
+
+        class NSDaemon(Daemon):
+            def run(nsdcls):
+                # replace nscls's start function
+                print(f"{nscls} start running...")
+                if nscls._running:
+                    return
+                nscls._running_stop_event.clear()
+                nscls.run()
+
+        return NSDaemon(**self.kwargs)
 
     def run(self) -> None:
         self._running = True
